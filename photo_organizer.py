@@ -57,6 +57,12 @@ ALL_EXTENSIONS = PHOTO_EXTENSIONS | VIDEO_EXTENSIONS | RAW_EXTENSIONS
 UNKNOWN_FOLDER = "Unknown"
 DUPLICATES_FOLDER = "_Duplicates"
 
+# Files to always ignore (system/hidden files)
+IGNORED_FILES = {
+    ".ds_store", "thumbs.db", "desktop.ini", ".localized",
+    "photo_organizer.log",
+}
+
 # EXIF tag IDs for date fields
 EXIF_DATE_TAGS = {
     36867: "DateTimeOriginal",
@@ -252,6 +258,9 @@ def index_destination(dest: str, logger: logging.Logger) -> dict[str, str]:
 def get_dest_folder(dest: str, file_date: datetime | None, category: str = "") -> str:
     """Return the target folder path: dest/Category/YYYY/MM or dest/Category/Unknown."""
     base = os.path.join(dest, category) if category else dest
+    # "Other" files go straight into Other/ with no date subfolders
+    if category == "Other":
+        return base
     if file_date is None:
         return os.path.join(base, UNKNOWN_FOLDER)
     year = str(file_date.year)
@@ -282,11 +291,13 @@ def get_unique_filepath(folder: str, filename: str) -> str:
 def get_media_category(filepath: str) -> str:
     """Determine the media category based on file extension."""
     ext = os.path.splitext(filepath)[1].lower()
-    if ext in VIDEO_EXTENSIONS:
+    if ext in PHOTO_EXTENSIONS:
+        return "Photos"
+    elif ext in VIDEO_EXTENSIONS:
         return "Videos"
     elif ext in RAW_EXTENSIONS:
         return "RAW"
-    return "Photos"
+    return "Other"
 
 
 # ---------------------------------------------------------------------------
@@ -294,13 +305,14 @@ def get_media_category(filepath: str) -> str:
 # ---------------------------------------------------------------------------
 
 def collect_files(source: str) -> list[str]:
-    """Recursively collect all supported files from the source directory."""
+    """Recursively collect all files from the source directory (excluding system/hidden files)."""
     files = []
     for root, _dirs, filenames in os.walk(source):
         for fname in filenames:
-            ext = os.path.splitext(fname)[1].lower()
-            if ext in ALL_EXTENSIONS:
-                files.append(os.path.join(root, fname))
+            # Skip hidden files and known system files
+            if fname.startswith(".") or fname.lower() in IGNORED_FILES:
+                continue
+            files.append(os.path.join(root, fname))
     return files
 
 
@@ -321,9 +333,9 @@ def process_file(
     filename = os.path.basename(filepath)
     category = get_media_category(filepath)
 
-    # 1. Duplicate detection (skip for videos — they're large and rarely duplicated)
+    # 1. Duplicate detection (only for photos & RAW)
     file_hash = None
-    if category != "Videos":
+    if category in ("Photos", "RAW"):
         try:
             file_hash = hash_file(filepath)
         except (OSError, PermissionError) as e:
@@ -351,10 +363,12 @@ def process_file(
             stats["duplicates"] += 1
             return
 
-    # 2. Extract date
-    file_date = get_file_date(filepath)
-    if file_date is None:
-        stats["no_date"] += 1
+    # 2. Extract date (skip for Other files — they just go in a flat folder)
+    file_date = None
+    if category != "Other":
+        file_date = get_file_date(filepath)
+        if file_date is None:
+            stats["no_date"] += 1
 
     # 3. Determine destination folder (routed by category)
     target_folder = get_dest_folder(dest, file_date, category)
@@ -457,9 +471,10 @@ def reorganize(
         if abs_root.startswith(duplicates_path):
             continue
         for fname in filenames:
-            ext = os.path.splitext(fname)[1].lower()
-            if ext in ALL_EXTENSIONS:
-                files.append(os.path.join(root, fname))
+            # Skip hidden files and known system files
+            if fname.startswith(".") or fname.lower() in IGNORED_FILES:
+                continue
+            files.append(os.path.join(root, fname))
 
     logger.info(f"Found {len(files)} files to reorganize at destination.")
 
@@ -474,9 +489,9 @@ def reorganize(
         filename = os.path.basename(filepath)
         category = get_media_category(filepath)
 
-        # Duplicate detection (skip for videos)
+        # Duplicate detection (only for photos & RAW)
         file_hash = None
-        if category != "Videos":
+        if category in ("Photos", "RAW"):
             try:
                 file_hash = hash_file(filepath)
             except (OSError, PermissionError) as e:
@@ -506,9 +521,11 @@ def reorganize(
                 continue
 
         # Determine correct location
-        file_date = get_file_date(filepath)
-        if file_date is None:
-            stats["no_date"] += 1
+        file_date = None
+        if category != "Other":
+            file_date = get_file_date(filepath)
+            if file_date is None:
+                stats["no_date"] += 1
 
         target_folder = get_dest_folder(dest, file_date, category)
         target_path = get_unique_filepath(target_folder, filename)
